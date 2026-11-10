@@ -375,3 +375,9 @@ To trigger restarts manually:
 ```bash
 docker exec -u znuny znuny_daemon touch /persistent/restart-daemon /persistent/restart-httpd
 ```
+
+## License
+
+Copyright (C) 2021 Znuny GmbH, https://znuny.org/
+
+This project is licensed under the GNU General Public License v3.0 or later (`GPL-3.0-or-later`). See [LICENSE](LICENSE) for the full text.
