@@ -306,39 +306,46 @@ Examples:
 
 ```bash
 # List available commands
-docker exec -u znuny znuny_daemon /opt/znuny/bin/znuny.Console.pl List
+docker compose exec -u znuny znuny-daemon /opt/znuny/bin/znuny.Console.pl List
 
 # Install an add-on from a repository
-docker exec -u znuny znuny_daemon /opt/znuny/bin/znuny.Console.pl Admin::Package::Install <url>
+docker compose exec -u znuny znuny-daemon /opt/znuny/bin/znuny.Console.pl Admin::Package::Install <url>
 
 # Rebuild the system configuration
-docker exec -u znuny znuny_daemon /opt/znuny/bin/znuny.Console.pl Maint::Config::Rebuild
+docker compose exec -u znuny znuny-daemon /opt/znuny/bin/znuny.Console.pl Maint::Config::Rebuild
 
 # Delete the cache
-docker exec -u znuny znuny_daemon /opt/znuny/bin/znuny.Console.pl Maint::Cache::Delete
+docker compose exec -u znuny znuny-daemon /opt/znuny/bin/znuny.Console.pl Maint::Cache::Delete
 ```
 
-### Database Backup with mysqldump
+### Database Backup with mariadb-dump
 
 Using environment variables from `.env`:
 
 ```bash
 source .env
-docker exec znuny_db mysqldump -u "$DB_USER" -p"$DB_USER_PASS" "$DB_NAME" > backup.sql
+docker compose exec znuny-db mariadb-dump -u "$DB_USER" -p"$DB_USER_PASS" "$DB_NAME" > backup.sql
 ```
 
 To create a compressed backup:
 
 ```bash
 source .env
-docker exec znuny_db mysqldump -u "$DB_USER" -p"$DB_USER_PASS" "$DB_NAME" | gzip > backup_$(date +%Y%m%d_%H%M%S).sql.gz
+docker compose exec znuny-db mariadb-dump -u "$DB_USER" -p"$DB_USER_PASS" "$DB_NAME" | gzip > backup_$(date +%Y%m%d_%H%M%S).sql.gz
 ```
 
 ### Restoring a Database Backup
 
 ```bash
 source .env
-docker exec -i znuny_db mysql -u "$DB_USER" -p"$DB_USER_PASS" "$DB_NAME" < backup.sql
+docker compose exec --no-TTY znuny-db mariadb -u "$DB_USER" -p"$DB_USER_PASS" "$DB_NAME" < backup.sql
+```
+
+### Opening a Database Shell
+
+```bash
+source .env
+docker compose exec znuny-db mariadb -t -u "$DB_USER" -p"$DB_USER_PASS" "$DB_NAME"
 ```
 
 ## CI/CD
@@ -373,7 +380,7 @@ A custom Znuny add-on hooks into the package manager to create these trigger fil
 To trigger restarts manually:
 
 ```bash
-docker exec -u znuny znuny_daemon touch /persistent/restart-daemon /persistent/restart-httpd
+docker compose exec -u znuny znuny-daemon touch /persistent/restart-daemon /persistent/restart-httpd
 ```
 
 ## License
