@@ -46,15 +46,25 @@ jobs:
           scandir: .
           ignore_paths: .git
 
+  # Each platform is built natively on its own runner and pushed by digest;
+  # the merge jobs then create the multi-platform manifest list per tag.
   build-base:
-    name: Build base image
-    runs-on: ubuntu-latest
+    name: Build base image (${{ matrix.arch.name }})
+    runs-on: ${{ matrix.arch.runner }}
     needs: [shellcheck, prepare]
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        arch:
+          - { name: amd64, platform: linux/amd64, runner: ubuntu-latest }
+          - { name: arm64, platform: linux/arm64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -63,26 +73,47 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push znuny-base
+      - name: Build and push znuny-base by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: dockerfiles/base
+          platforms: ${{ matrix.arch.platform }}
           build-args: ZNUNY_VERSION=${{ needs.prepare.outputs.znuny_version }}
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-base:${{ needs.prepare.outputs.znuny_version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-base:latest
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-base,push-by-digest=true,name-canonical=true,push=true
 
-  build-daemon:
-    name: Build daemon image
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-znuny-base-${{ matrix.arch.name }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-base:
+    name: Publish base image
     runs-on: ubuntu-latest
     needs: [build-base, prepare]
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-znuny-base-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -91,30 +122,37 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull and tag base image
+      - name: Create and push manifest list
+        working-directory: ${{ runner.temp }}/digests
         run: |
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-base:${{ needs.prepare.outputs.znuny_version }}
-          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-base:${{ needs.prepare.outputs.znuny_version }} znuny-base
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-base"
+          docker buildx imagetools create \
+            -t "$IMAGE:${{ needs.prepare.outputs.znuny_version }}" \
+            -t "$IMAGE:latest" \
+            $(printf "$IMAGE@sha256:%s " *)
 
-      - name: Build and push znuny-daemon
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: dockerfiles/daemon
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-daemon:${{ needs.prepare.outputs.znuny_version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-daemon:latest
-
-  build-httpd:
-    name: Build Apache image
-    runs-on: ubuntu-latest
-    needs: [build-base, prepare]
+  # The base image is passed as a named build context; it resolves to the
+  # runner's platform from the manifest list published by merge-base.
+  build-app:
+    name: Build ${{ matrix.image.name }} image (${{ matrix.arch.name }})
+    runs-on: ${{ matrix.arch.runner }}
+    needs: [merge-base, prepare]
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        image:
+          - { name: znuny-daemon, file: dockerfiles/daemon }
+          - { name: znuny-httpd, file: dockerfiles/apache }
+        arch:
+          - { name: amd64, platform: linux/amd64, runner: ubuntu-latest }
+          - { name: arm64, platform: linux/arm64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -123,17 +161,63 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull and tag base image
-        run: |
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-base:${{ needs.prepare.outputs.znuny_version }}
-          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-base:${{ needs.prepare.outputs.znuny_version }} znuny-base
-
-      - name: Build and push znuny-httpd
+      - name: Build and push ${{ matrix.image.name }} by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: dockerfiles/apache
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-httpd:${{ needs.prepare.outputs.znuny_version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-httpd:latest
+          file: ${{ matrix.image.file }}
+          platforms: ${{ matrix.arch.platform }}
+          build-contexts: znuny-base=docker-image://${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/znuny-base:${{ needs.prepare.outputs.znuny_version }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image.name }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image.name }}-${{ matrix.arch.name }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-app:
+    name: Publish ${{ matrix.image }} image
+    runs-on: ubuntu-latest
+    needs: [build-app, prepare]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        image: [znuny-daemon, znuny-httpd]
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ matrix.image }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest list
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}"
+          docker buildx imagetools create \
+            -t "$IMAGE:${{ needs.prepare.outputs.znuny_version }}" \
+            -t "$IMAGE:latest" \
+            $(printf "$IMAGE@sha256:%s " *)
